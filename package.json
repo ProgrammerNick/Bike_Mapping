@@ -1,0 +1,16 @@
+{
+  "name": "bike-route-maker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check app.js && node --check server.mjs"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
