@@ -8,8 +8,9 @@ import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-// Resolve project root from this file's location: api/ → ../
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Static files live in /public/ (Vercel's idiomatic convention; also keeps
+// browser code out of the function bundle). api/ → ../public/
+const publicRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 const scrypt = promisify(scryptCallback);
 let sqlPromise;
 
@@ -518,7 +519,7 @@ export async function handleRequest(request, response) {
   // Static file serving — only used in local dev. On Vercel, /api/[[...slug]]
   // never receives non-API paths because static files are CDN-served directly.
   const safePath = normalize(url.pathname === "/" ? "index.html" : url.pathname.replace(/^[/\\]/, "")).replace(/^(\.\.[/\\])+/, "");
-  const filePath = join(root, safePath);
+  const filePath = join(publicRoot, safePath);
 
   try {
     const body = await readFile(filePath);
