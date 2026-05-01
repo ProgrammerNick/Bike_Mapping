@@ -4,106 +4,72 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bike Route Maker</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIINfQnFqD1q8sK8rjGfJYo4R8N4gD4v9qM="
-      crossorigin=""
-    />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="./styles.css?v=4" />
   </head>
   <body>
-    <main class="app-shell">
+    <main id="appView" class="app-canvas">
+      <div id="map" class="app-map"></div>
+
       <section class="panel" aria-label="Route planner controls">
         <div class="brand-row">
           <div>
             <p class="eyebrow">Bike Route Maker</p>
-            <h1>Plan a better ride</h1>
+            <h1>Plan a ride</h1>
           </div>
-          <button id="locateBtn" class="icon-button" type="button" title="Use current location" aria-label="Use current location">
-            <span aria-hidden="true">⌖</span>
-          </button>
+          <div class="brand-actions">
+            <select id="tileStyleSelect" class="tile-style-select" aria-label="Map style" title="Map style">
+              <option value="positron">Map</option>
+              <option value="voyager">Vivid</option>
+              <option value="dark">Dark</option>
+              <option value="osm">Plain</option>
+              <option value="mapbox-outdoors" hidden>Mapbox Outdoors</option>
+              <option value="mapbox-streets" hidden>Mapbox Streets</option>
+            </select>
+            <button id="locateBtn" class="icon-button" type="button" title="Use current location" aria-label="Use current location">
+              <span aria-hidden="true">⌖</span>
+            </button>
+          </div>
         </div>
 
         <form id="routeForm" class="route-form">
-          <label>
-            Start
-            <input id="startInput" name="start" autocomplete="street-address" placeholder="Address, place, or click map" required />
-          </label>
-          <label>
-            Destination
-            <input id="endInput" name="end" autocomplete="street-address" placeholder="Address, place, or click map" required />
-          </label>
-
-          <div class="two-col">
-            <label>
-              Route source
-              <select id="providerSelect" name="provider">
-                <option value="osrm-bike">Free OSM bike</option>
-                <option value="osrm-foot">Free sidewalks/foot</option>
-                <option value="ors">OpenRouteService</option>
-              </select>
-            </label>
-            <label>
-              Bike profile
-              <select id="profileSelect" name="profile">
-                <option value="cycling-regular">Everyday</option>
-                <option value="cycling-road">Road</option>
-                <option value="cycling-electric">E-bike</option>
-                <option value="cycling-mountain">Mountain</option>
-              </select>
-            </label>
-            <label>
-              Preference
-              <select id="preferenceSelect" name="preference">
-                <option value="recommended">Recommended</option>
-                <option value="shortest">Shortest</option>
-              </select>
-            </label>
-          </div>
-
-          <label>
-            OpenRouteService API key
-            <input id="apiKeyInput" name="apiKey" placeholder="Paste key for real bike routing" />
-          </label>
+          <div id="stopsList" class="stops-list" aria-label="Route stops"></div>
+          <button id="addStopBtn" type="button" class="ghost-btn">+ Add stop</button>
 
           <div class="button-row">
             <button class="primary" type="submit">Make Route</button>
-            <button id="swapBtn" type="button">Swap</button>
+            <button id="reverseBtn" type="button">Reverse</button>
             <button id="clearBtn" type="button">Clear</button>
           </div>
+
+          <details class="advanced">
+            <summary>Advanced options</summary>
+            <div class="advanced-body">
+              <div class="two-col">
+                <label>
+                  Bike profile
+                  <select id="profileSelect">
+                    <option value="cycling-regular">Everyday</option>
+                    <option value="cycling-road">Road</option>
+                    <option value="cycling-electric">E-bike</option>
+                    <option value="cycling-mountain">Mountain</option>
+                  </select>
+                </label>
+                <label>
+                  Preference
+                  <select id="preferenceSelect">
+                    <option value="recommended">Recommended</option>
+                    <option value="shortest">Shortest</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </details>
         </form>
 
         <div id="message" class="message" role="status">
-          Paste an API key, enter two places, then make a route. Without a key, the map can still place points and preview a direct line.
+          Click points on the map or start typing a place to plan a ride.
         </div>
-
-        <section class="account" aria-label="Account and saved trips">
-          <div class="section-title">
-            <h2>Account</h2>
-            <button id="logoutBtn" type="button" hidden>Sign Out</button>
-          </div>
-          <form id="authForm" class="auth-form">
-            <label>
-              Email
-              <input id="emailInput" name="email" type="email" autocomplete="email" placeholder="you@example.com" />
-            </label>
-            <label>
-              Password
-              <input id="passwordInput" name="password" type="password" autocomplete="current-password" placeholder="8+ characters" />
-            </label>
-            <div class="button-row">
-              <button id="loginBtn" type="submit">Sign In</button>
-              <button id="signupBtn" type="button">Create Account</button>
-            </div>
-          </form>
-          <div id="accountStatus" class="account-status">Neon-backed accounts activate after `DATABASE_URL` is set on the server.</div>
-          <div class="save-trip-row">
-            <input id="tripNameInput" placeholder="Trip name" />
-            <button id="saveTripBtn" type="button" disabled>Save Trip</button>
-          </div>
-          <div id="tripsList" class="trips-list"></div>
-        </section>
 
         <section class="stats" aria-label="Route summary">
           <div>
@@ -120,28 +86,67 @@
           </div>
         </section>
 
+        <figure id="elevationFigure" class="elevation-figure" hidden>
+          <figcaption>
+            <span>Elevation</span>
+            <span id="elevationRange" class="elevation-range"></span>
+          </figcaption>
+          <svg id="elevationChart" viewBox="0 0 600 110" preserveAspectRatio="none" aria-label="Elevation profile"></svg>
+        </figure>
+
         <div class="export-row">
-          <button id="sidewalkBtn" type="button">Show Sidewalks</button>
+          <button id="downloadGpxBtn" type="button" disabled>Download GPX</button>
           <button id="downloadGeojsonBtn" type="button" disabled>Download GeoJSON</button>
-          <button id="copyApiBtn" type="button">Copy API Example</button>
         </div>
+
+        <section class="account" id="accountSection" aria-label="Account">
+          <div class="section-title">
+            <h2 id="accountHeading">Account</h2>
+            <button id="logoutBtn" type="button" hidden>Sign Out</button>
+          </div>
+          <div id="accountStatus" class="account-status">Sign in to save trips and unlock higher rate limits — or keep using the app as a guest.</div>
+          <form id="authForm" class="auth-form">
+            <label>
+              Email
+              <input id="emailInput" name="email" type="email" autocomplete="email" placeholder="you@example.com" />
+            </label>
+            <label>
+              Password
+              <input id="passwordInput" name="password" type="password" autocomplete="current-password" placeholder="8+ characters" minlength="8" />
+            </label>
+            <div class="button-row">
+              <button class="primary" type="submit">Sign In</button>
+              <button id="signupBtn" type="button">Create Account</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="account" aria-label="Saved trips" id="tripsSection" hidden>
+          <div class="section-title">
+            <h2>Saved trips</h2>
+          </div>
+          <div class="save-trip-row">
+            <input id="tripNameInput" placeholder="Trip name (optional)" />
+            <button id="saveTripBtn" type="button" disabled>Save Trip</button>
+          </div>
+          <div id="tripsList" class="trips-list"></div>
+        </section>
+
+        <section class="favorites" aria-label="Saved favorite places" id="favoritesSection">
+          <div class="section-title">
+            <h2>Favorites</h2>
+          </div>
+          <div id="favoritesList" class="favorites-list"></div>
+        </section>
 
         <section class="steps-wrap" aria-label="Turn by turn directions">
           <h2>Turns</h2>
           <ol id="stepsList" class="steps-list"></ol>
         </section>
       </section>
-
-      <section class="map-section" aria-label="Interactive route map">
-        <div id="map"></div>
-      </section>
     </main>
 
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin=""
-    ></script>
-    <script src="./app.js"></script>
+    <script src="./vendor/leaflet/leaflet.js"></script>
+    <script src="./app.js?v=4"></script>
   </body>
 </html>

@@ -19,9 +19,20 @@ CREATE TABLE IF NOT EXISTS trips (
   provider TEXT NOT NULL,
   start_point JSONB NOT NULL,
   end_point JSONB NOT NULL,
+  stops JSONB,
   route_geojson JSONB NOT NULL,
   distance_meters DOUBLE PRECISION,
   duration_seconds DOUBLE PRECISION,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS favorites (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  lat DOUBLE PRECISION NOT NULL,
+  lng DOUBLE PRECISION NOT NULL,
+  label TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

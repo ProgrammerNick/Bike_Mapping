@@ -27,6 +27,11 @@ const types = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
 };
 
 async function getSql() {
@@ -64,6 +69,7 @@ async function migrate() {
       provider TEXT NOT NULL,
       start_point JSONB NOT NULL,
       end_point JSONB NOT NULL,
+      stops JSONB,
       route_geojson JSONB NOT NULL,
       distance_meters DOUBLE PRECISION,
       duration_seconds DOUBLE PRECISION,
@@ -71,6 +77,64 @@ async function migrate() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  await sql`ALTER TABLE trips ADD COLUMN IF NOT EXISTS stops JSONB`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS favorites (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      label TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0,
+      window_start TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+}
+
+const RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const RATE_LIMIT_GUEST = 30;
+const RATE_LIMIT_USER = 200;
+
+function clientIp(request) {
+  const fwd = request.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd.length) return fwd.split(",")[0].trim();
+  return request.socket?.remoteAddress || "unknown";
+}
+
+// In local dev there's no proxy, every request is from 127.0.0.1, and per-IP
+// rate limiting is meaningless. Detect prod (Vercel etc.) by checking for an
+// X-Forwarded-For header — present in production, absent locally.
+function shouldRateLimit(request) {
+  return Boolean(request.headers["x-forwarded-for"]);
+}
+
+async function checkRateLimit(sql, key, limit) {
+  const rows = await sql`SELECT count, window_start FROM rate_limits WHERE key = ${key}`;
+  const now = new Date();
+  if (!rows.length) {
+    await sql`INSERT INTO rate_limits (key, count, window_start) VALUES (${key}, 1, ${now.toISOString()})`;
+    return { ok: true, remaining: limit - 1 };
+  }
+  const row = rows[0];
+  const windowStart = new Date(row.window_start);
+  const windowEnd = new Date(windowStart.getTime() + RATE_WINDOW_MS);
+  if (now > windowEnd) {
+    await sql`UPDATE rate_limits SET count = 1, window_start = ${now.toISOString()} WHERE key = ${key}`;
+    return { ok: true, remaining: limit - 1 };
+  }
+  if (row.count >= limit) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((windowEnd.getTime() - now.getTime()) / 1000));
+    return { ok: false, retryAfter: retryAfterSeconds };
+  }
+  await sql`UPDATE rate_limits SET count = count + 1 WHERE key = ${key}`;
+  return { ok: true, remaining: limit - row.count - 1 };
 }
 
 function sendJson(response, status, payload) {
@@ -135,7 +199,99 @@ async function requireUser(request, response) {
 async function handleApi(request, response, url) {
   const sql = await getSql();
   if (url.pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, databaseConfigured: Boolean(sql) });
+    sendJson(response, 200, {
+      ok: true,
+      databaseConfigured: Boolean(sql),
+      routingConfigured: Boolean(process.env.ORS_API_KEY),
+      mapboxConfigured: Boolean(process.env.MAPBOX_TOKEN),
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/config" && request.method === "GET") {
+    // Public tokens only — never expose secret keys here. Mapbox public tokens
+    // are designed to live in browser code with URL restrictions.
+    sendJson(response, 200, {
+      mapboxToken: process.env.MAPBOX_TOKEN || null,
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/route" && request.method === "POST") {
+    const orsKey = process.env.ORS_API_KEY;
+    if (!orsKey) {
+      sendJson(response, 503, { error: "Routing is not configured on the server." });
+      return true;
+    }
+    const body = await readJson(request);
+    if (!Array.isArray(body.coordinates) || body.coordinates.length < 2) {
+      sendJson(response, 400, { error: "Need at least 2 coordinates." });
+      return true;
+    }
+
+    // Rate limit: signed-in users get a higher cap, guests are limited per IP.
+    // Only apply in production (Vercel), where X-Forwarded-For gives us the
+    // real client IP. In local dev all requests look like 127.0.0.1 so the
+    // limit would just block your own browser after a few requests.
+    if (sql && shouldRateLimit(request)) {
+      const auth = request.headers.authorization || "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      let user = null;
+      if (token) {
+        const userRows = await sql`
+          SELECT users.id FROM sessions JOIN users ON users.id = sessions.user_id
+          WHERE sessions.token_hash = ${hashToken(token)} AND sessions.expires_at > now() LIMIT 1
+        `;
+        user = userRows[0] || null;
+      }
+      const key = user ? `user:${user.id}` : `ip:${clientIp(request)}`;
+      const limit = user ? RATE_LIMIT_USER : RATE_LIMIT_GUEST;
+      const result = await checkRateLimit(sql, key, limit);
+      if (!result.ok) {
+        response.writeHead(429, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Retry-After": String(result.retryAfter),
+        });
+        response.end(JSON.stringify({
+          error: user
+            ? `Rate limit reached (${RATE_LIMIT_USER} routes/hour). Try again in ${Math.ceil(result.retryAfter / 60)} minute(s).`
+            : `Guest rate limit reached (${RATE_LIMIT_GUEST} routes/hour). Sign in for ${RATE_LIMIT_USER}/hour, or try again in ${Math.ceil(result.retryAfter / 60)} minute(s).`,
+        }));
+        return true;
+      }
+    }
+
+    const allowedProfiles = new Set(["cycling-regular", "cycling-road", "cycling-electric", "cycling-mountain"]);
+    const profile = allowedProfiles.has(body.profile) ? body.profile : "cycling-regular";
+    const allowedPrefs = new Set(["recommended", "shortest", "fastest"]);
+    const preference = allowedPrefs.has(body.preference) ? body.preference : "recommended";
+    try {
+      const orsResponse = await fetch(`https://api.openrouteservice.org/v2/directions/${profile}/geojson`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json, application/geo+json",
+          "Content-Type": "application/json",
+          Authorization: orsKey,
+        },
+        body: JSON.stringify({
+          coordinates: body.coordinates,
+          preference,
+          elevation: true,
+          instructions: true,
+          units: "mi",
+        }),
+      });
+      if (!orsResponse.ok) {
+        const detail = await orsResponse.text();
+        sendJson(response, orsResponse.status, { error: `Routing failed: ${detail.slice(0, 240)}` });
+        return true;
+      }
+      const geojson = await orsResponse.json();
+      response.writeHead(200, { "Content-Type": "application/geo+json" });
+      response.end(JSON.stringify(geojson));
+    } catch (error) {
+      sendJson(response, 502, { error: `Could not reach routing service: ${error.message}` });
+    }
     return true;
   }
 
@@ -195,7 +351,7 @@ async function handleApi(request, response, url) {
     const user = await requireUser(request, response);
     if (!user) return true;
     const rows = await sql`
-      SELECT id, name, provider, start_point, end_point, distance_meters, duration_seconds, created_at, updated_at
+      SELECT id, name, provider, start_point, end_point, stops, distance_meters, duration_seconds, created_at, updated_at
       FROM trips
       WHERE user_id = ${user.id}
       ORDER BY updated_at DESC
@@ -212,9 +368,10 @@ async function handleApi(request, response, url) {
       sendJson(response, 400, { error: "Route, start, and destination are required." });
       return true;
     }
+    const stops = Array.isArray(body.stops) && body.stops.length >= 2 ? body.stops : [body.start, body.end];
     const id = randomUUID();
     const rows = await sql`
-      INSERT INTO trips (id, user_id, name, provider, start_point, end_point, route_geojson, distance_meters, duration_seconds)
+      INSERT INTO trips (id, user_id, name, provider, start_point, end_point, stops, route_geojson, distance_meters, duration_seconds)
       VALUES (
         ${id},
         ${user.id},
@@ -222,6 +379,7 @@ async function handleApi(request, response, url) {
         ${String(body.provider || "unknown").slice(0, 80)},
         ${JSON.stringify(body.start)}::jsonb,
         ${JSON.stringify(body.end)}::jsonb,
+        ${JSON.stringify(stops)}::jsonb,
         ${JSON.stringify(body.routeGeojson)}::jsonb,
         ${Number(body.distanceMeters || 0)},
         ${Number(body.durationSeconds || 0)}
@@ -229,6 +387,49 @@ async function handleApi(request, response, url) {
       RETURNING *
     `;
     sendJson(response, 201, { trip: formatTrip(rows[0]) });
+    return true;
+  }
+
+  if (url.pathname === "/api/favorites" && request.method === "GET") {
+    const user = await requireUser(request, response);
+    if (!user) return true;
+    const rows = await sql`
+      SELECT id, name, lat, lng, label, created_at
+      FROM favorites
+      WHERE user_id = ${user.id}
+      ORDER BY name ASC
+    `;
+    sendJson(response, 200, { favorites: rows.map(formatFavorite) });
+    return true;
+  }
+
+  if (url.pathname === "/api/favorites" && request.method === "POST") {
+    const user = await requireUser(request, response);
+    if (!user) return true;
+    const body = await readJson(request);
+    const name = String(body.name || "").trim().slice(0, 80);
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+    if (!name || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+      sendJson(response, 400, { error: "Favorite needs a name and valid coordinates." });
+      return true;
+    }
+    const id = randomUUID();
+    const rows = await sql`
+      INSERT INTO favorites (id, user_id, name, lat, lng, label)
+      VALUES (${id}, ${user.id}, ${name}, ${lat}, ${lng}, ${String(body.label || "").slice(0, 240) || null})
+      RETURNING id, name, lat, lng, label, created_at
+    `;
+    sendJson(response, 201, { favorite: formatFavorite(rows[0]) });
+    return true;
+  }
+
+  const favoriteMatch = url.pathname.match(/^\/api\/favorites\/([^/]+)$/);
+  if (favoriteMatch && request.method === "DELETE") {
+    const user = await requireUser(request, response);
+    if (!user) return true;
+    await sql`DELETE FROM favorites WHERE id = ${favoriteMatch[1]} AND user_id = ${user.id}`;
+    sendJson(response, 200, { ok: true });
     return true;
   }
 
@@ -271,6 +472,7 @@ function formatTripSummary(trip) {
     provider: trip.provider,
     start: trip.start_point,
     end: trip.end_point,
+    stops: trip.stops || [trip.start_point, trip.end_point],
     distanceMeters: trip.distance_meters,
     durationSeconds: trip.duration_seconds,
     createdAt: trip.created_at,
@@ -285,33 +487,74 @@ function formatTrip(trip) {
   };
 }
 
-createServer(async (request, response) => {
-  const url = new URL(request.url, `http://${request.headers.host}`);
+function formatFavorite(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    lat: row.lat,
+    lng: row.lng,
+    label: row.label,
+    createdAt: row.created_at,
+  };
+}
+
+// On Vercel, multiple invocations share the same Node instance until cold
+// reload. Migrations are idempotent (CREATE TABLE IF NOT EXISTS) but we only
+// run them once per instance to avoid wasted Postgres calls.
+let migratePromise = null;
+async function ensureMigrated() {
+  if (!migratePromise) migratePromise = migrate().catch((err) => {
+    console.warn("Migration failed:", err.message);
+    migratePromise = null; // allow retry on next request
+  });
+  return migratePromise;
+}
+
+export async function handleRequest(request, response) {
+  await ensureMigrated();
+  const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   if (url.pathname.startsWith("/api/")) {
     try {
       if (await handleApi(request, response, url)) return;
     } catch (error) {
+      console.error("Handler error:", error);
       sendJson(response, 500, { error: error.message || "Unexpected server error." });
       return;
     }
+    return;
   }
 
+  // Static file serving — only used in local dev. On Vercel, /api/[[...slug]]
+  // never receives non-API paths because static files are CDN-served directly.
   const safePath = normalize(url.pathname === "/" ? "index.html" : url.pathname.replace(/^[/\\]/, "")).replace(/^(\.\.[/\\])+/, "");
   const filePath = join(root, safePath);
 
   try {
     const body = await readFile(filePath);
-    response.writeHead(200, { "Content-Type": types[extname(filePath)] || "application/octet-stream" });
+    const ext = extname(filePath);
+    const headers = { "Content-Type": types[ext] || "application/octet-stream" };
+    if (ext === ".html" || ext === ".js" || ext === ".css") {
+      headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+      headers.Pragma = "no-cache";
+      headers.Expires = "0";
+    }
+    response.writeHead(200, headers);
     response.end(body);
   } catch {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("Not found");
   }
-}).listen(port, async () => {
-  try {
-    await migrate();
-  } catch (error) {
-    console.warn(`Database migration skipped/failed: ${error.message}`);
-  }
-  console.log(`Bike Route Maker running at http://localhost:${port}`);
-});
+}
+
+// Only start the HTTP listener if this file was invoked directly (local dev).
+// When imported by /api/[...slug].js on Vercel, we just expose handleRequest.
+// VERCEL env var is set automatically on Vercel — extra defensive check.
+const isDirectInvocation =
+  !process.env.VERCEL &&
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+if (isDirectInvocation) {
+  createServer(handleRequest).listen(port, () => {
+    console.log(`Bike Route Maker running at http://localhost:${port}`);
+  });
+}
