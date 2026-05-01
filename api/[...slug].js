@@ -1,17 +1,12 @@
-// Vercel catch-all for /api/* requests. Delegates to the same handler used by
-// the local dev server (server.mjs) so logic isn't duplicated.
-import { handleRequest } from "../server.mjs";
-
-export const config = {
-  // Body parsing must be off — handleRequest reads the request stream itself.
-  api: { bodyParser: false },
-};
+// Vercel catch-all for /api/* requests. Imports the shared handler from a
+// local sibling file (./_handler.js) — keeps the import path simple and
+// avoids any cross-folder bundling quirks.
+import { handleRequest } from "./_handler.js";
 
 export default async function handler(req, res) {
   try {
     await handleRequest(req, res);
   } catch (error) {
-    // Surface the error in Vercel's function logs so we can diagnose.
     console.error("Catch-all handler crashed:", error?.stack || error);
     if (!res.headersSent) {
       res.statusCode = 500;
